@@ -3,12 +3,13 @@ import time
 import pandas as pd
 import networkx as nx
 from pathlib import Path
-from config import GRAPHS_DIR, RESULTS_DIR, NUM_RUNS
+from config import GRAPHS_DIR, RESULTS_DIR, FIGURES_DIR, NUM_RUNS
 
 from exact_shortest_path import ExactSolvers
 from genetic_algorithm import GeneticAlgorithm
 from particle_swarm import ParticleSwarmOptimization
 from simulated_quantum_annealing import SQAOptimizer
+from visualize_graphs import plot_solution
 
 def load_graph(file_path):
     with open(file_path, "r") as f:
@@ -22,17 +23,23 @@ def main():
     results = []
     graph_files = list(GRAPHS_DIR.glob("*.json"))
     
+    # Base directory for solution plots
+    solutions_dir = FIGURES_DIR / "solutions"
+    solutions_dir.mkdir(exist_ok=True)
+    
     for g_file in graph_files:
-        print(f"--- Processing {g_file.name} ---")
+        print(f"\n--- Processing {g_file.name} ---")
         G, src, tgt, cap = load_graph(g_file)
         v_size = len(G.nodes())
         
-        # 1. Exact Baselines
         print("Running Exact Solvers...")
-        exact_spp_cost, _ = ExactSolvers.solve_spp(G, src, tgt)
-        exact_rcspp_cost, _ = ExactSolvers.solve_rcspp(G, src, tgt, cap)
+        exact_spp_cost, exact_spp_path = ExactSolvers.solve_spp(G, src, tgt)
+        exact_rcspp_cost, exact_rcspp_path = ExactSolvers.solve_rcspp(G, src, tgt, cap)
         
-        # Heuristics definition mapped to problem type
+        # Save exact baselines visuals
+        plot_solution(G, exact_spp_path, f"Exact SPP | V={v_size} | Cost={exact_spp_cost:.2f}", solutions_dir / f"V{v_size}/Exact_SPP.png")
+        plot_solution(G, exact_rcspp_path, f"Exact RCSPP | V={v_size} | Cost={exact_rcspp_cost:.2f}", solutions_dir / f"V{v_size}/Exact_RCSPP.png", cap)
+
         tasks = [
             ("SPP", "GA", GeneticAlgorithm, exact_spp_cost, None),
             ("RCSPP", "GA", GeneticAlgorithm, exact_rcspp_cost, cap),
@@ -56,10 +63,14 @@ def main():
                     run_costs.append(cost)
                     feasibility_count += 1
                     
+                    # Generate visualization for this run
+                    out_png = solutions_dir / f"V{v_size}" / f"{alg_name}_{prob_type}_run{run_idx}.png"
+                    title = f"{alg_name} {prob_type} | V={v_size} | Run {run_idx} | Cost={cost:.2f}"
+                    plot_solution(G, path, title, out_png, capacity_val)
+                    
             total_time = time.time() - start_time
             tts = total_time / NUM_RUNS
             
-            # Metric Math Calculation
             rho = (feasibility_count / NUM_RUNS) * 100
             
             if run_costs:
@@ -83,11 +94,10 @@ def main():
                 "Optimality_Gap": gap
             })
 
-    # Save to disk
     df = pd.DataFrame(results)
     df.to_csv(RESULTS_DIR / "benchmark_results.csv", index=False)
     df.to_excel(RESULTS_DIR / "benchmark_results.xlsx", index=False)
-    print("Experiments Complete. Data saved to results directory.")
+    print("\nExperiments Complete. Data and visualizations saved.")
 
 if __name__ == "__main__":
     main()

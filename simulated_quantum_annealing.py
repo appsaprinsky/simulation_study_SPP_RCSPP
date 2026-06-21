@@ -13,64 +13,75 @@ class SQAOptimizer:
         self.edges = list(G.edges())
         self.edge_to_idx = {edge: i for i, edge in enumerate(self.edges)}
         
-    def build_qubo(self) -> dict:
-        num_edges = len(self.edges)
+    def _calculate_dynamic_penalty(self) -> float:
+        """
+        Calculates a strict constraint penalty (lambda) that outweighs any 
+        possible benefit the quantum sampler could get from illegally picking negative edges.
+        """
+        # Calculate the absolute max reward for cheating
+        sum_negative_edges = sum(d['cost'] for u, v, d in self.G.edges(data=True) if d['cost'] < 0)
+        max_positive_edge = max((d['cost'] for u, v, d in self.G.edges(data=True)), default=0)
         
-        # Slack variables for capacity
-        num_slacks = 0
-        if self.capacity is not None:
-            num_slacks = int(np.log2(max(1, int(self.capacity)))) + 1
-            
-        total_vars = num_edges + num_slacks
-        Q = np.zeros((total_vars, total_vars))
+        # Penalty = |Max Cheat Reward| + Highest Edge + Buffer
+        base_penalty = abs(sum_negative_edges) + max_positive_edge + 50.0
         
-        P_flow = SQA_PARAMS["flow_penalty"]
-        P_cap = SQA_PARAMS["cap_penalty"]
+        # Scale for larger graphs to maintain quantum pressure
+        scale_factor = max(1.0, len(self.G.nodes()) / 10.0)
+        return base_penalty * scale_factor
+
+    def build_qubo(self):
+        """Constructs the QUBO matrix using a dynamically scaled lambda penalty."""
+        from collections import defaultdict
+        Q = defaultdict(float)
         
-        # 1. Objective Costs
+        # 1. Get the dynamic lambda penalty
+        lambda_penalty = self._calculate_dynamic_penalty()
+        
+        # 2. Apply Objective Function (Minimize Cost)
         for edge, idx in self.edge_to_idx.items():
             u, v = edge
-            Q[idx, idx] += self.G[u][v]['cost']
+            Q[(idx, idx)] += self.G[u][v]['cost']
             
-        # 2. Flow Conservation
+        # 3. Apply Flow Conservation Constraints
         for node in self.G.nodes():
-            b = 1 if node == self.source else (-1 if node == self.target else 0)
-            in_e = [self.edge_to_idx[e] for e in self.G.in_edges(node)]
-            out_e = [self.edge_to_idx[e] for e in self.G.out_edges(node)]
-            
-            all_e = in_e + out_e
-            signs = {idx: 1 for idx in in_e}
-            for idx in out_e: signs[idx] = -1
+            if node == self.source:
+                expected_flow = 1
+            elif node == self.target:
+                expected_flow = -1
+            else:
+                expected_flow = 0
                 
-            for idx in in_e: Q[idx, idx] -= 2 * b * P_flow
-            for idx in out_e: Q[idx, idx] += 2 * b * P_flow
+            edges_out = [(node, v) for v in self.G.successors(node)]
+            edges_in = [(u, node) for u in self.G.predecessors(node)]
+            
+            # Linear terms
+            for edge in edges_out:
+                idx = self.edge_to_idx[edge]
+                Q[(idx, idx)] += lambda_penalty * (1 - 2 * expected_flow)
                 
-            for i in range(len(all_e)):
-                for j in range(i, len(all_e)):
-                    idx_i, idx_j = all_e[i], all_e[j]
-                    val = P_flow * signs[idx_i] * signs[idx_j]
-                    if i == j: Q[idx_i, idx_i] += val
-                    else: Q[min(idx_i, idx_j), max(idx_i, idx_j)] += 2 * val
-                        
-        # 3. Capacity Constraint
-        if self.capacity is not None:
-            slack_indices = [num_edges + k for k in range(num_slacks)]
-            slack_weights = [2**k for k in range(num_slacks)]
-            
-            cap_vars = list(self.edge_to_idx.values()) + slack_indices
-            cap_weights = [self.G[e[0]][e[1]]['resource'] for e in self.edges] + slack_weights
-            
-            for i, idx_i in enumerate(cap_vars):
-                w_i = cap_weights[i]
-                Q[idx_i, idx_i] -= 2 * self.capacity * w_i * P_cap
-                for j in range(i, len(cap_vars)):
-                    idx_j = cap_vars[j]
-                    w_j = cap_weights[j]
-                    val = P_cap * w_i * w_j
-                    if i == j: Q[idx_i, idx_i] += val
-                    else: Q[min(idx_i, idx_j), max(idx_i, idx_j)] += 2 * val
+            for edge in edges_in:
+                idx = self.edge_to_idx[edge]
+                Q[(idx, idx)] += lambda_penalty * (1 + 2 * expected_flow)
+                
+            # Quadratic terms (out * out)
+            for i in range(len(edges_out)):
+                for j in range(i + 1, len(edges_out)):
+                    idx1, idx2 = sorted([self.edge_to_idx[edges_out[i]], self.edge_to_idx[edges_out[j]]])
+                    Q[(idx1, idx2)] += 2 * lambda_penalty
+                    
+            # Quadratic terms (in * in)
+            for i in range(len(edges_in)):
+                for j in range(i + 1, len(edges_in)):
+                    idx1, idx2 = sorted([self.edge_to_idx[edges_in[i]], self.edge_to_idx[edges_in[j]]])
+                    Q[(idx1, idx2)] += 2 * lambda_penalty
+                    
+            # Cross terms (out * in) - These subtract penalty because 1 in, 1 out = balanced flow
+            for e_out in edges_out:
+                for e_in in edges_in:
+                    idx1, idx2 = sorted([self.edge_to_idx[e_out], self.edge_to_idx[e_in]])
+                    Q[(idx1, idx2)] -= 2 * lambda_penalty
 
-        return {(i, j): Q[i, j] for i in range(total_vars) for j in range(i, total_vars) if Q[i, j] != 0}
+        return Q
 
     def run(self) -> Tuple[float, List[int], bool]:
         qubo = self.build_qubo()
@@ -89,7 +100,6 @@ class SQAOptimizer:
         
         best_sample = sampleset.first.sample
         
-        # Reconstruct path and verify
         cost, res = 0.0, 0.0
         path_edges = []
         for edge, idx in self.edge_to_idx.items():
@@ -99,9 +109,25 @@ class SQAOptimizer:
                 res += self.G[u][v]['resource']
                 path_edges.append(edge)
                 
-        # Basic structural verification
+        # --- NEW: Convert selected edges into a sequential list of nodes ---
+        edge_dict = {u: v for u, v in path_edges}
+        node_path = [self.source]
+        current = self.source
         is_feasible = True
+
+        # Trace the path from source to target to ensure structural validity
+        while current != self.target:
+            if current not in edge_dict:
+                # Flow conservation was violated by the quantum sampler (broken path)
+                is_feasible = False
+                break
+            
+            next_node = edge_dict[current]
+            node_path.append(next_node)
+            current = next_node
+                
+        # Verify capacity constraint
         if self.capacity and res > self.capacity:
             is_feasible = False
             
-        return cost, path_edges, is_feasible
+        return cost, node_path, is_feasible
