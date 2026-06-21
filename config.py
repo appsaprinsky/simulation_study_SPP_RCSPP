@@ -12,10 +12,9 @@ for d in [GRAPHS_DIR, FIGURES_DIR, RESULTS_DIR, LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # --- Global Experiment Settings ---
-GRAPH_SIZES = [5, 10, 20, 50, 100, 200]
-GRAPH_SIZES = [5, 10, 20, 50, 100, 200]
+GRAPH_SIZES = [5, 10, 20, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500]
 NUM_RUNS = 1
-TIME_LIMIT_SEC = 300  # 5 minutes
+TIME_LIMIT_SEC = 500  # 5 minutes
 MASTER_SEED = 42
 
 # --- Metaheuristic Hyperparameters ---

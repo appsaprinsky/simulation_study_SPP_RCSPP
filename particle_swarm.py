@@ -21,6 +21,10 @@ class ParticleSwarmOptimization:
         best_path = []
         is_feasible = False
         
+        # Fallback tracking for structural paths regardless of capacity constraint
+        best_structural_fit = float('inf')
+        best_structural_path = []
+        
         for _ in range(PSO_PARAMS["iterations"]):
             for i in range(swarm_size):
                 fit, res, pth = self.decoder.decode(positions[i])
@@ -28,6 +32,11 @@ class ParticleSwarmOptimization:
                 if fit < pbest_fit[i]:
                     pbest_fit[i] = fit
                     pbest_pos[i] = positions[i]
+                
+                # Keep record of the absolute best structural route encountered
+                if pth and fit < best_structural_fit:
+                    best_structural_fit = fit
+                    best_structural_path = pth
                     
                 valid = self.decoder.capacity is None or res <= self.decoder.capacity
                 if fit < gbest_fit and valid:
@@ -42,7 +51,10 @@ class ParticleSwarmOptimization:
                           PSO_PARAMS["c2"] * r2 * (gbest_pos - positions))
                           
             positions = positions + velocities
-            # Keep priorities in bounded range
             positions = np.clip(positions, 0.0, 1.0)
             
-        return gbest_fit, best_path, is_feasible
+        # Return the feasible path if found; otherwise, provide the best structural path
+        if is_feasible:
+            return gbest_fit, best_path, True
+        else:
+            return best_structural_fit, best_structural_path, False
