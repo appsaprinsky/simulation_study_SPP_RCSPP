@@ -2,6 +2,7 @@ import numpy as np
 import networkx as nx
 from neal import SimulatedAnnealingSampler
 from typing import Tuple, List
+from collections import defaultdict
 from config import SQA_PARAMS
 
 class SQAOptimizer:
@@ -14,22 +15,24 @@ class SQAOptimizer:
         self.edge_to_idx = {edge: i for i, edge in enumerate(self.edges)}
         
     def _calculate_dynamic_penalty(self) -> float:
-        """Calculates structural lambda penalty to prevent broken paths."""
-        sum_negative_edges = sum(d['cost'] for u, v, d in self.G.edges(data=True) if d['cost'] < 0)
-        max_positive_edge = max((d['cost'] for u, v, d in self.G.edges(data=True)), default=0)
-        base_penalty = abs(sum_negative_edges) + max_positive_edge + 50.0
-        scale_factor = max(1.0, len(self.G.nodes()) / 10.0)
-        return base_penalty * scale_factor
+        """Calculates a tighter structural constraint bound to prevent objective drowning."""
+        edge_costs = [d['cost'] for u, v, d in self.G.edges(data=True)]
+        max_positive = max((c for c in edge_costs if c > 0), default=1.0)
+        min_negative = min((c for c in edge_costs if c < 0), default=0.0)
+        
+        # A valid simple path will cross at most len(G.nodes) steps
+        max_path_cost = max_positive * len(self.G.nodes())
+        max_path_savings = abs(min_negative) * len(self.G.nodes())
+        
+        # Tighter penalty threshold that protects the objective function precision
+        return max_path_savings + max_path_cost + 25.0
 
     def build_qubo(self, mu: float = 0.0):
-        """Constructs the QUBO matrix with structural lambda and a linear Lagrangian resource penalty."""
-        from collections import defaultdict
+        """Constructs the QUBO matrix with structural lambda and a linear Lagrangian penalty."""
         Q = defaultdict(float)
-        
         lambda_penalty = self._calculate_dynamic_penalty()
         
         # 1. Objective Function (Minimize Cost + mu * Resource)
-        # Linear Lagrangian modification preserves perfect matrix sparsity
         for edge, idx in self.edge_to_idx.items():
             u, v = edge
             cost = self.G[u][v]['cost']
@@ -75,10 +78,9 @@ class SQAOptimizer:
         if len(self.edges) > 1000:
             return float('inf'), [], False
 
-        # Parameters for adaptive multiplier scaling (Lagrangian Relaxation Loop)
         mu = 0.0  
-        max_feedback_loops = 10 if self.capacity is not None else 1
-        alpha = 0.5  # Dynamic learning rate step size
+        max_feedback_loops = 12 if self.capacity is not None else 1
+        alpha = 0.4  
         
         last_valid_path = []
         last_valid_cost = float('inf')
@@ -97,59 +99,68 @@ class SQAOptimizer:
             current_loop_violation = 0.0
             found_structural_path = False
             
-            # Post-selection filtering across returned states sorted by energy
             for datum in sampleset.data(['sample']):
                 sample = datum.sample
-                cost, res = 0.0, 0.0
-                path_edges = []
                 
+                # Build an explicit adjacency map of active selections to handle branching
+                active_successors = defaultdict(list)
                 for edge, idx in self.edge_to_idx.items():
                     if sample[idx] == 1:
                         u, v = edge
-                        cost += self.G[u][v]['cost']
-                        res += self.G[u][v]['resource']
-                        path_edges.append(edge)
+                        active_successors[u].append(v)
                 
-                # Trace structural path flow validity
-                edge_dict = {u: v for u, v in path_edges}
+                # Trace the structural path safely out of the sample noise
                 node_path = [self.source]
                 current = self.source
                 valid_flow = True
+                visited = {self.source}
                 
                 while current != self.target:
-                    if current not in edge_dict:
+                    if current not in active_successors or not active_successors[current]:
                         valid_flow = False
                         break
-                    next_node = edge_dict[current]
+                    
+                    # Pick the primary path forward
+                    next_node = active_successors[current][0]
+                    
+                    # Cycle breakout guard for noisy states
+                    if next_node in visited:
+                        valid_flow = False
+                        break
+                        
                     node_path.append(next_node)
+                    visited.add(next_node)
                     current = next_node
                 
                 if valid_flow:
-                    if self.capacity is None or res <= self.capacity:
-                        # SUCCESS: Path is structurally sound and respects the resource budget
-                        return cost, node_path, True
+                    # Calculate clean metrics EXCLUSIVELY along the true path sequence
+                    clean_cost = 0.0
+                    clean_res = 0.0
+                    for i in range(len(node_path) - 1):
+                        u, v = node_path[i], node_path[i+1]
+                        clean_cost += self.G[u][v]['cost']
+                        clean_res += self.G[u][v]['resource']
                     
-                    # Track metrics for the lowest-energy structural path of this specific iteration
+                    # Evaluate condition based on targeted measurements
+                    if self.capacity is None or clean_res <= self.capacity:
+                        return clean_cost, node_path, True
+                    
                     if not found_structural_path:
                         found_structural_path = True
-                        current_loop_violation = res - self.capacity
+                        current_loop_violation = clean_res - self.capacity
                     
-                    # Track global fallback for the closest near-feasible path across all loops
-                    violation = res - self.capacity
+                    violation = clean_res - self.capacity
                     if violation < min_violation:
                         min_violation = violation
                         last_valid_path = node_path
-                        last_valid_cost = cost
+                        last_valid_cost = clean_cost
             
-            # Subgradient adaptation step
+            # Feedback step
             if found_structural_path and current_loop_violation > 0:
                 mu += alpha * current_loop_violation
             else:
-                # If the landscape didn't yield clean paths, steadily step up the pressure
-                mu += 2.0
+                mu += 2.5
 
-        # Fallback Strategy: If max iterations expire without a perfect match,
-        # return the structural path that had the lowest overall capacity violation
         if last_valid_path:
             return last_valid_cost, last_valid_path, False
             

@@ -26,7 +26,6 @@ def main():
     solutions_dir = FIGURES_DIR / "solutions"
     solutions_dir.mkdir(exist_ok=True)
     
-    # Initialize a clean debug text log file for side-by-side path comparisons
     debug_log_path = RESULTS_DIR / "path_sequences_comparison.txt"
     with open(debug_log_path, "w") as log_f:
         log_f.write("=== MANUAL PATH SEQUENCES COMPARISON LOG ===\n\n")
@@ -68,11 +67,6 @@ def main():
                 cost, path, is_feas = solver.run()
                 
                 if cost != float('inf') and path:
-                    # Collect the cost metric unconditionally to populate your tables
-                    run_costs.append(cost)
-                    if is_feas:
-                        feasibility_count += 1
-                    
                     # Log raw string path data directly to the text file for quick scanning
                     with open(debug_log_path, "a") as log_f:
                         log_f.write(f"  [{prob_type}] {alg_name} Run {run_idx:02d} | Feasible={str(is_feas):5s} | Cost={cost:9.2f} | Path: {path}\n")
@@ -82,6 +76,11 @@ def main():
                     out_png = solutions_dir / f"V{v_size}" / f"{alg_name}_{prob_type}_run{run_idx}.png"
                     title = f"{alg_name} {prob_type} | Run {run_idx} | Cost={cost:.2f} | Feasible={is_feas}"
                     plot_solution(G, path, title, out_png, capacity_val)
+                    
+                    # CRITICAL FIX: Only inject feasible costs into the math metrics
+                    if is_feas:
+                        run_costs.append(cost)
+                        feasibility_count += 1
                     
             total_time = time.time() - start_time
             tts = total_time / NUM_RUNS
