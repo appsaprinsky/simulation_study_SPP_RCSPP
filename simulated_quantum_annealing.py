@@ -15,31 +15,32 @@ class SQAOptimizer:
         self.edge_to_idx = {edge: i for i, edge in enumerate(self.edges)}
         
     def _calculate_dynamic_penalty(self) -> float:
-        """Calculates a tighter structural constraint bound to prevent objective drowning."""
+        """Calculates a tighter structural constraint bound using exact DAG depth."""
         edge_costs = [d['cost'] for u, v, d in self.G.edges(data=True)]
         max_positive = max((c for c in edge_costs if c > 0), default=1.0)
         min_negative = min((c for c in edge_costs if c < 0), default=0.0)
         
-        # A valid simple path will cross at most len(G.nodes) steps
-        max_path_cost = max_positive * len(self.G.nodes())
-        max_path_savings = abs(min_negative) * len(self.G.nodes())
+        # FIX: Use actual maximum hops in DAG to prevent Penalty Drowning
+        try:
+            max_hops = len(nx.dag_longest_path(self.G))
+        except nx.NetworkXUnfeasible:
+            max_hops = len(self.G.nodes()) // 4  # Fallback assumption
+            
+        max_path_cost = max_positive * max_hops
+        max_path_savings = abs(min_negative) * max_hops
         
-        # Tighter penalty threshold that protects the objective function precision
         return max_path_savings + max_path_cost + 25.0
 
     def build_qubo(self, mu: float = 0.0):
-        """Constructs the QUBO matrix with structural lambda and a linear Lagrangian penalty."""
         Q = defaultdict(float)
         lambda_penalty = self._calculate_dynamic_penalty()
         
-        # 1. Objective Function (Minimize Cost + mu * Resource)
         for edge, idx in self.edge_to_idx.items():
             u, v = edge
             cost = self.G[u][v]['cost']
             resource = self.G[u][v]['resource'] if self.capacity is not None else 0.0
             Q[(idx, idx)] += cost + mu * resource
             
-        # 2. Structural Flow Conservation Constraints (Lambda)
         for node in self.G.nodes():
             if node == self.source:
                 expected_flow = 1
@@ -75,8 +76,7 @@ class SQAOptimizer:
 
     def run(self) -> Tuple[float, List[int], bool]:
         sampler = SimulatedAnnealingSampler()
-        if len(self.edges) > 1000:
-            return float('inf'), [], False
+        # FIX: Removed the 1000 edge hard-stop limit here
 
         mu = 0.0  
         max_feedback_loops = 12 if self.capacity is not None else 1
@@ -102,14 +102,12 @@ class SQAOptimizer:
             for datum in sampleset.data(['sample']):
                 sample = datum.sample
                 
-                # Build an explicit adjacency map of active selections to handle branching
                 active_successors = defaultdict(list)
                 for edge, idx in self.edge_to_idx.items():
                     if sample[idx] == 1:
                         u, v = edge
                         active_successors[u].append(v)
                 
-                # Trace the structural path safely out of the sample noise
                 node_path = [self.source]
                 current = self.source
                 valid_flow = True
@@ -120,10 +118,13 @@ class SQAOptimizer:
                         valid_flow = False
                         break
                     
-                    # Pick the primary path forward
+                    # FIX: Reject states with branching (invalid structural flow) instead of masking them
+                    if len(active_successors[current]) > 1:
+                        valid_flow = False
+                        break
+                        
                     next_node = active_successors[current][0]
                     
-                    # Cycle breakout guard for noisy states
                     if next_node in visited:
                         valid_flow = False
                         break
@@ -133,7 +134,6 @@ class SQAOptimizer:
                     current = next_node
                 
                 if valid_flow:
-                    # Calculate clean metrics EXCLUSIVELY along the true path sequence
                     clean_cost = 0.0
                     clean_res = 0.0
                     for i in range(len(node_path) - 1):
@@ -141,7 +141,6 @@ class SQAOptimizer:
                         clean_cost += self.G[u][v]['cost']
                         clean_res += self.G[u][v]['resource']
                     
-                    # Evaluate condition based on targeted measurements
                     if self.capacity is None or clean_res <= self.capacity:
                         return clean_cost, node_path, True
                     
@@ -155,7 +154,6 @@ class SQAOptimizer:
                         last_valid_path = node_path
                         last_valid_cost = clean_cost
             
-            # Feedback step
             if found_structural_path and current_loop_violation > 0:
                 mu += alpha * current_loop_violation
             else:

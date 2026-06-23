@@ -12,8 +12,10 @@ for d in [GRAPHS_DIR, FIGURES_DIR, RESULTS_DIR, LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # --- Global Experiment Settings ---
-GRAPH_SIZES = [5, 10, 20, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500]
-NUM_RUNS = 1
+GRAPH_SIZES = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200]
+GRAPH_SIZES_NON_DAG = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+NUM_RUNS_DAG = 2
+NUM_RUNS_NON_DAG = 2
 TIME_LIMIT_SEC = 500  # 5 minutes
 MASTER_SEED = 42
 

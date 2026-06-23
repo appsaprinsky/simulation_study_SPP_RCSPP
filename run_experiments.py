@@ -3,13 +3,14 @@ import time
 import pandas as pd
 import networkx as nx
 from pathlib import Path
-from config import GRAPHS_DIR, RESULTS_DIR, FIGURES_DIR, NUM_RUNS
+from config import GRAPHS_DIR, RESULTS_DIR, FIGURES_DIR, NUM_RUNS_DAG, NUM_RUNS_NON_DAG
 
 from exact_shortest_path import ExactSolvers
 from genetic_algorithm import GeneticAlgorithm
 from particle_swarm import ParticleSwarmOptimization
 from simulated_quantum_annealing import SQAOptimizer
 from visualize_graphs import plot_solution
+from non_dag_solvers import solve_non_dag_exact
 
 def load_graph(file_path):
     with open(file_path, "r") as f:
@@ -20,97 +21,148 @@ def load_graph(file_path):
     return G, data["source"], data["target"], data["capacity"]
 
 def main():
-    results = []
-    graph_files = list(GRAPHS_DIR.glob("*.json"))
-    
-    solutions_dir = FIGURES_DIR / "solutions"
-    solutions_dir.mkdir(exist_ok=True)
-    
-    debug_log_path = RESULTS_DIR / "path_sequences_comparison.txt"
-    with open(debug_log_path, "w") as log_f:
-        log_f.write("=== MANUAL PATH SEQUENCES COMPARISON LOG ===\n\n")
-    
-    for g_file in graph_files:
-        print(f"\n--- Processing {g_file.name} ---")
-        G, src, tgt, cap = load_graph(g_file)
-        v_size = len(G.nodes())
-        
-        print("Running Exact Solvers...")
-        exact_spp_cost, exact_spp_path = ExactSolvers.solve_spp(G, src, tgt)
-        exact_rcspp_cost, exact_rcspp_path = ExactSolvers.solve_rcspp(G, src, tgt, cap)
-        
-        plot_solution(G, exact_spp_path, f"Exact SPP | V={v_size} | Cost={exact_spp_cost:.2f}", solutions_dir / f"V{v_size}/Exact_SPP.png")
-        plot_solution(G, exact_rcspp_path, f"Exact RCSPP | V={v_size} | Cost={exact_rcspp_cost:.2f}", solutions_dir / f"V{v_size}/Exact_RCSPP.png", cap)
+    # Define the configurations for the two types of graphs
+    batches = [
+        {
+            "input_dir": GRAPHS_DIR,
+            "folder_name": "graphs",
+            "num_runs": NUM_RUNS_DAG
+        },
+        {
+            "input_dir": GRAPHS_DIR.parent / "graphs_non_dag",
+            "folder_name": "graphs_non_dag",
+            "num_runs": NUM_RUNS_NON_DAG
+        }
+    ]
 
-        with open(debug_log_path, "a") as log_f:
-            log_f.write(f"\nGraph Size: {v_size} Nodes | File: {g_file.name}\n")
-            log_f.write(f"  -> Exact SPP Path:   {exact_spp_path} (Cost: {exact_spp_cost:.2f})\n")
-            log_f.write(f"  -> Exact RCSPP Path: {exact_rcspp_path} (Cost: {exact_rcspp_cost:.2f})\n")
+    for batch in batches:
+        search_dir = batch["input_dir"]
+        folder_name = batch["folder_name"]
+        total_runs = batch["num_runs"]
 
-        tasks = [
-            ("SPP", "GA", GeneticAlgorithm, exact_spp_cost, None),
-            ("RCSPP", "GA", GeneticAlgorithm, exact_rcspp_cost, cap),
-            ("SPP", "PSO", ParticleSwarmOptimization, exact_spp_cost, None),
-            ("RCSPP", "PSO", ParticleSwarmOptimization, exact_rcspp_cost, cap),
-            ("SPP", "SQA", SQAOptimizer, exact_spp_cost, None),
-            ("RCSPP", "SQA", SQAOptimizer, exact_rcspp_cost, cap)
-        ]
+        if not search_dir.exists():
+            print(f"\n[WARNING] Directory not found, skipping: {search_dir}")
+            continue
+
+        print(f"\n==================================================")
+        print(f" STARTING BATCH: {folder_name.upper()} ({total_runs} runs per solver)")
+        print(f"==================================================")
+
+        # Setup dedicated output directories for this specific batch
+        current_results_dir = RESULTS_DIR / folder_name
+        current_results_dir.mkdir(parents=True, exist_ok=True)
         
-        for prob_type, alg_name, SolverClass, exact_cost, capacity_val in tasks:
-            print(f"Executing {alg_name} for {prob_type}...")
-            run_costs = []
-            feasibility_count = 0
-            start_time = time.time()
+        current_solutions_dir = FIGURES_DIR / "solutions" / folder_name
+        current_solutions_dir.mkdir(parents=True, exist_ok=True)
+        
+        debug_log_path = current_results_dir / "path_sequences_comparison.txt"
+        with open(debug_log_path, "w") as log_f:
+            log_f.write(f"=== MANUAL PATH SEQUENCES COMPARISON LOG ({folder_name.upper()}) ===\n\n")
+
+        results = []
+        graph_files = sorted(list(search_dir.glob("*.json")))
+        
+        for g_file in graph_files:
+            print(f"\n--- Processing {g_file.name} ---")
+            G, src, tgt, cap = load_graph(g_file)
+            v_size = len(G.nodes())
             
-            for run_idx in range(NUM_RUNS):
-                solver = SolverClass(G, src, tgt, capacity_val)
-                cost, path, is_feas = solver.run()
-                
-                if cost != float('inf') and path:
-                    # Log raw string path data directly to the text file for quick scanning
-                    with open(debug_log_path, "a") as log_f:
-                        log_f.write(f"  [{prob_type}] {alg_name} Run {run_idx:02d} | Feasible={str(is_feas):5s} | Cost={cost:9.2f} | Path: {path}\n")
-                    
-                    # Unconditionally output visualization files to see the spatial route overlay
-                    (solutions_dir / f"V{v_size}").mkdir(parents=True, exist_ok=True)
-                    out_png = solutions_dir / f"V{v_size}" / f"{alg_name}_{prob_type}_run{run_idx}.png"
-                    title = f"{alg_name} {prob_type} | Run {run_idx} | Cost={cost:.2f} | Feasible={is_feas}"
-                    plot_solution(G, path, title, out_png, capacity_val)
-                    
-                    # CRITICAL FIX: Only inject feasible costs into the math metrics
-                    if is_feas:
-                        run_costs.append(cost)
-                        feasibility_count += 1
-                    
-            total_time = time.time() - start_time
-            tts = total_time / NUM_RUNS
-            rho = (feasibility_count / NUM_RUNS) * 100
-            
-            if run_costs:
-                f_best = min(run_costs)
-                f_mean = sum(run_costs) / len(run_costs)
-                sigma = pd.Series(run_costs).std() if len(run_costs) > 1 else 0.0
-                gap = ((f_mean - exact_cost) / abs(exact_cost)) * 100 if exact_cost != 0 else 0
+            print("Running Exact Solvers...")
+            if nx.is_directed_acyclic_graph(G):
+                # Your existing DAG methods remain completely unchanged
+                exact_spp_cost, exact_spp_path = ExactSolvers.solve_spp(G, src, tgt)
+                exact_rcspp_cost, exact_rcspp_path = ExactSolvers.solve_rcspp(G, src, tgt, cap)
             else:
-                f_best = f_mean = sigma = gap = None
+                # Use the new file ONLY for non-DAGs
+                exact_spp_cost, exact_spp_path = solve_non_dag_exact(G, src, tgt, None)
+                exact_rcspp_cost, exact_rcspp_path = solve_non_dag_exact(G, src, tgt, cap)
 
-            results.append({
-                "Nodes": v_size,
-                "Problem": prob_type,
-                "Algorithm": alg_name,
-                "Exact_Cost": exact_cost,
-                "TTS_sec": tts,
-                "Feasibility_Rho": rho,
-                "f_best": f_best,
-                "f_mean": f_mean,
-                "Sigma": sigma,
-                "Optimality_Gap": gap
-            })
+            
+            # Save Exact solutions to the separated folder
+            (current_solutions_dir / f"V{v_size}").mkdir(parents=True, exist_ok=True)
+            plot_solution(G, exact_spp_path, f"Exact SPP | V={v_size} | Cost={exact_spp_cost:.2f}", current_solutions_dir / f"V{v_size}/Exact_SPP.png")
+            plot_solution(G, exact_rcspp_path, f"Exact RCSPP | V={v_size} | Cost={exact_rcspp_cost:.2f}", current_solutions_dir / f"V{v_size}/Exact_RCSPP.png", cap)
 
-    df = pd.DataFrame(results)
-    df.to_csv(RESULTS_DIR / "benchmark_results.csv", index=False)
-    df.to_excel(RESULTS_DIR / "benchmark_results.xlsx", index=False)
-    print(f"\nExperiments Complete. Review path logs directly at: {debug_log_path}")
+            with open(debug_log_path, "a") as log_f:
+                log_f.write(f"\nGraph Size: {v_size} Nodes | File: {g_file.name}\n")
+                log_f.write(f"  -> Exact SPP Path:   {exact_spp_path} (Cost: {exact_spp_cost:.2f})\n")
+                log_f.write(f"  -> Exact RCSPP Path: {exact_rcspp_path} (Cost: {exact_rcspp_cost:.2f})\n")
+
+            tasks = [
+                ("SPP", "GA", GeneticAlgorithm, exact_spp_cost, None),
+                ("RCSPP", "GA", GeneticAlgorithm, exact_rcspp_cost, cap),
+                ("SPP", "PSO", ParticleSwarmOptimization, exact_spp_cost, None),
+                ("RCSPP", "PSO", ParticleSwarmOptimization, exact_rcspp_cost, cap),
+                ("SPP", "SQA", SQAOptimizer, exact_spp_cost, None),
+                ("RCSPP", "SQA", SQAOptimizer, exact_rcspp_cost, cap)
+            ]
+            
+            for prob_type, alg_name, SolverClass, exact_cost, capacity_val in tasks:
+                print(f"Executing {alg_name} for {prob_type}...")
+                run_costs_feasible = []
+                run_costs_all = []
+                feasibility_count = 0
+                start_time = time.time()
+                
+                # Execute based on the specific batch's total_runs
+                for run_idx in range(total_runs):
+                    solver = SolverClass(G, src, tgt, capacity_val)
+                    cost, path, is_feas = solver.run()
+                    
+                    if cost != float('inf') and path:
+                        run_costs_all.append(cost)
+                        
+                        with open(debug_log_path, "a") as log_f:
+                            log_f.write(f"  [{prob_type}] {alg_name} Run {run_idx:02d} | Feasible={str(is_feas):5s} | Cost={cost:9.2f} | Path: {path}\n")
+                        
+                        out_png = current_solutions_dir / f"V{v_size}" / f"{alg_name}_{prob_type}_run{run_idx}.png"
+                        title = f"{alg_name} {prob_type} | Run {run_idx} | Cost={cost:.2f} | Feasible={is_feas}"
+                        plot_solution(G, path, title, out_png, capacity_val)
+                        
+                        if is_feas:
+                            run_costs_feasible.append(cost)
+                            feasibility_count += 1
+                        
+                total_time = time.time() - start_time
+                tts = total_time / total_runs
+                rho = (feasibility_count / total_runs) * 100
+                
+                if run_costs_feasible:
+                    f_best_feas = min(run_costs_feasible)
+                    f_mean_feas = sum(run_costs_feasible) / len(run_costs_feasible)
+                    sigma = pd.Series(run_costs_feasible).std() if len(run_costs_feasible) > 1 else 0.0
+                    gap = ((f_mean_feas - exact_cost) / abs(exact_cost)) * 100 if exact_cost != 0 else 0
+                else:
+                    f_best_feas = f_mean_feas = sigma = gap = None
+
+                if run_costs_all:
+                    f_best_all = min(run_costs_all)
+                    f_mean_all = sum(run_costs_all) / len(run_costs_all)
+                else:
+                    f_best_all = f_mean_all = None
+
+                results.append({
+                    "Nodes": v_size,
+                    "Problem": prob_type,
+                    "Algorithm": alg_name,
+                    "Exact_Cost": exact_cost,
+                    "TTS_sec": tts,
+                    "Feasibility_Rho": rho,
+                    "f_best": f_best_feas,
+                    "f_mean": f_mean_feas,
+                    "f_best_all": f_best_all,
+                    "f_mean_all": f_mean_all,
+                    "Sigma": sigma,
+                    "Optimality_Gap": gap
+                })
+
+        df = pd.DataFrame(results)
+        # Save independent tables per category
+        df.to_csv(current_results_dir / "benchmark_results.csv", index=False)
+        df.to_excel(current_results_dir / "benchmark_results.xlsx", index=False)
+        
+        print(f"\n--- Batch {folder_name.upper()} Complete ---")
+        print(f"Results saved to: {current_results_dir}/")
 
 if __name__ == "__main__":
     main()
