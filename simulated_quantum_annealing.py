@@ -20,11 +20,12 @@ class SQAOptimizer:
         max_positive = max((c for c in edge_costs if c > 0), default=1.0)
         min_negative = min((c for c in edge_costs if c < 0), default=0.0)
         
-        # FIX: Use actual maximum hops in DAG to prevent Penalty Drowning
-        try:
+        # Robustly handle DAG vs Non-DAG
+        if nx.is_directed_acyclic_graph(self.G):
             max_hops = len(nx.dag_longest_path(self.G))
-        except nx.NetworkXUnfeasible:
-            max_hops = len(self.G.nodes()) // 4  # Fallback assumption
+        else:
+            # For Non-DAGs, assume the worst-case elementary path visits every node
+            max_hops = len(self.G.nodes())
             
         max_path_cost = max_positive * max_hops
         max_path_savings = abs(min_negative) * max_hops
@@ -76,12 +77,16 @@ class SQAOptimizer:
 
     def run(self) -> Tuple[float, List[int], bool]:
         sampler = SimulatedAnnealingSampler()
-        # FIX: Removed the 1000 edge hard-stop limit here
 
         mu = 0.0  
         max_feedback_loops = 12 if self.capacity is not None else 1
         alpha = 0.4  
         
+        # Track the absolute best FEASIBLE solution across all loops and samples
+        best_feasible_path = []
+        best_feasible_cost = float('inf')
+        
+        # Track the best INFEASIBLE (fallback) solution across all loops and samples
         last_valid_path = []
         last_valid_cost = float('inf')
         min_violation = float('inf')
@@ -118,7 +123,6 @@ class SQAOptimizer:
                         valid_flow = False
                         break
                     
-                    # FIX: Reject states with branching (invalid structural flow) instead of masking them
                     if len(active_successors[current]) > 1:
                         valid_flow = False
                         break
@@ -141,25 +145,39 @@ class SQAOptimizer:
                         clean_cost += self.G[u][v]['cost']
                         clean_res += self.G[u][v]['resource']
                     
+                    # Determine Feasibility
                     if self.capacity is None or clean_res <= self.capacity:
-                        return clean_cost, node_path, True
-                    
-                    if not found_structural_path:
-                        found_structural_path = True
-                        current_loop_violation = clean_res - self.capacity
-                    
-                    violation = clean_res - self.capacity
-                    if violation < min_violation:
-                        min_violation = violation
-                        last_valid_path = node_path
-                        last_valid_cost = clean_cost
+                        # Track the lowest cost feasible path found so far
+                        if clean_cost < best_feasible_cost:
+                            best_feasible_cost = clean_cost
+                            best_feasible_path = node_path
+                    else:
+                        # Track the structural path with the lowest resource violation
+                        if not found_structural_path:
+                            found_structural_path = True
+                            current_loop_violation = clean_res - self.capacity
+                        
+                        violation = clean_res - self.capacity
+                        if violation < min_violation:
+                            min_violation = violation
+                            last_valid_path = node_path
+                            last_valid_cost = clean_cost
             
-            if found_structural_path and current_loop_violation > 0:
-                mu += alpha * current_loop_violation
-            else:
-                mu += 2.5
+            # Update lagrange multiplier only if we haven't found a feasible solution yet
+            if self.capacity is not None and not best_feasible_path:
+                if found_structural_path and current_loop_violation > 0:
+                    mu += alpha * current_loop_violation
+                else:
+                    mu += 2.5
 
+        # --- FINAL CONTROL FLOW EVALUATION ---
+        # 1. If we found a valid, feasible path at any point, return it as optimal
+        if best_feasible_path:
+            return best_feasible_cost, best_feasible_path, True
+            
+        # 2. If feasibility is 0 but we managed to find an infeasible structural path, return it as fallback
         if last_valid_path:
             return last_valid_cost, last_valid_path, False
             
+        # 3. Absolute worst case: no structural paths were found at all
         return float('inf'), [], False

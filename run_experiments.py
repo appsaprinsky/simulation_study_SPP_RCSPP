@@ -3,7 +3,7 @@ import time
 import pandas as pd
 import networkx as nx
 from pathlib import Path
-from config import GRAPHS_DIR, RESULTS_DIR, FIGURES_DIR, NUM_RUNS_DAG, NUM_RUNS_NON_DAG
+from config import GRAPHS_DIR, RESULTS_DIR, FIGURES_DIR, NUM_RUNS_DAG, NUM_RUNS_NON_DAG, PLOT_SOLUTIONS
 
 from exact_shortest_path import ExactSolvers
 from genetic_algorithm import GeneticAlgorithm
@@ -21,7 +21,6 @@ def load_graph(file_path):
     return G, data["source"], data["target"], data["capacity"]
 
 def main():
-    # Define the configurations for the two types of graphs
     batches = [
         {
             "input_dir": GRAPHS_DIR,
@@ -48,7 +47,6 @@ def main():
         print(f" STARTING BATCH: {folder_name.upper()} ({total_runs} runs per solver)")
         print(f"==================================================")
 
-        # Setup dedicated output directories for this specific batch
         current_results_dir = RESULTS_DIR / folder_name
         current_results_dir.mkdir(parents=True, exist_ok=True)
         
@@ -69,19 +67,18 @@ def main():
             
             print("Running Exact Solvers...")
             if nx.is_directed_acyclic_graph(G):
-                # Your existing DAG methods remain completely unchanged
+                # for DAG 
                 exact_spp_cost, exact_spp_path = ExactSolvers.solve_spp(G, src, tgt)
                 exact_rcspp_cost, exact_rcspp_path = ExactSolvers.solve_rcspp(G, src, tgt, cap)
             else:
-                # Use the new file ONLY for non-DAGs
+                # ONLY for non-DAGs
                 exact_spp_cost, exact_spp_path = solve_non_dag_exact(G, src, tgt, None)
                 exact_rcspp_cost, exact_rcspp_path = solve_non_dag_exact(G, src, tgt, cap)
 
-            
-            # Save Exact solutions to the separated folder
             (current_solutions_dir / f"V{v_size}").mkdir(parents=True, exist_ok=True)
-            plot_solution(G, exact_spp_path, f"Exact SPP | V={v_size} | Cost={exact_spp_cost:.2f}", current_solutions_dir / f"V{v_size}/Exact_SPP.png")
-            plot_solution(G, exact_rcspp_path, f"Exact RCSPP | V={v_size} | Cost={exact_rcspp_cost:.2f}", current_solutions_dir / f"V{v_size}/Exact_RCSPP.png", cap)
+            if PLOT_SOLUTIONS:
+                plot_solution(G, exact_spp_path, f"Exact SPP | V={v_size} | Cost={exact_spp_cost:.2f}", current_solutions_dir / f"V{v_size}/Exact_SPP.png")
+                plot_solution(G, exact_rcspp_path, f"Exact RCSPP | V={v_size} | Cost={exact_rcspp_cost:.2f}", current_solutions_dir / f"V{v_size}/Exact_RCSPP.png", cap)
 
             with open(debug_log_path, "a") as log_f:
                 log_f.write(f"\nGraph Size: {v_size} Nodes | File: {g_file.name}\n")
@@ -104,24 +101,28 @@ def main():
                 feasibility_count = 0
                 start_time = time.time()
                 
-                # Execute based on the specific batch's total_runs
+                # based on the specific batch's total_runs
                 for run_idx in range(total_runs):
                     solver = SolverClass(G, src, tgt, capacity_val)
                     cost, path, is_feas = solver.run()
                     
-                    if cost != float('inf') and path:
-                        run_costs_all.append(cost)
-                        
-                        with open(debug_log_path, "a") as log_f:
-                            log_f.write(f"  [{prob_type}] {alg_name} Run {run_idx:02d} | Feasible={str(is_feas):5s} | Cost={cost:9.2f} | Path: {path}\n")
-                        
+                    # 1. save the cost to the 'all' tracker, even if it is float('inf')
+                    run_costs_all.append(cost)
+                    
+                    # 2. log record of the failure/infeasible path
+                    with open(debug_log_path, "a") as log_f:
+                        log_f.write(f"  [{prob_type}] {alg_name} Run {run_idx:02d} | Feasible={str(is_feas):5s} | Cost={cost:9.2f} | Path: {path}\n")
+                    
+                    # 3. attempt to plot if the algorithm actually returned a path sequence
+                    if PLOT_SOLUTIONS and path:
                         out_png = current_solutions_dir / f"V{v_size}" / f"{alg_name}_{prob_type}_run{run_idx}.png"
                         title = f"{alg_name} {prob_type} | Run {run_idx} | Cost={cost:.2f} | Feasible={is_feas}"
                         plot_solution(G, path, title, out_png, capacity_val)
-                        
-                        if is_feas:
-                            run_costs_feasible.append(cost)
-                            feasibility_count += 1
+                    
+                    # 4. filter for strict feasibility
+                    if is_feas and cost != float('inf'):
+                        run_costs_feasible.append(cost)
+                        feasibility_count += 1
                         
                 total_time = time.time() - start_time
                 tts = total_time / total_runs
@@ -150,14 +151,13 @@ def main():
                     "Feasibility_Rho": rho,
                     "f_best": f_best_feas,
                     "f_mean": f_mean_feas,
-                    "f_best_all": f_best_all,
-                    "f_mean_all": f_mean_all,
+                    "best_all": f_best_all,
+                    "mean_all": f_mean_all,
                     "Sigma": sigma,
                     "Optimality_Gap": gap
                 })
 
         df = pd.DataFrame(results)
-        # Save independent tables per category
         df.to_csv(current_results_dir / "benchmark_results.csv", index=False)
         df.to_excel(current_results_dir / "benchmark_results.xlsx", index=False)
         
