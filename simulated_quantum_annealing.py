@@ -1,6 +1,6 @@
 import numpy as np
 import networkx as nx
-from neal import SimulatedAnnealingSampler
+from openjij import SQASampler  # Corrected: Using true Path Integral Monte Carlo SQA
 from typing import Tuple, List
 from collections import defaultdict
 from config import SQA_PARAMS
@@ -76,7 +76,8 @@ class SQAOptimizer:
         return Q
 
     def run(self) -> Tuple[float, List[int], bool]:
-        sampler = SimulatedAnnealingSampler()
+        # Corrected: Now leveraging the actual SQA simulation framework
+        sampler = SQASampler()
 
         mu = 0.0  
         max_feedback_loops = 12 if self.capacity is not None else 1
@@ -94,16 +95,29 @@ class SQAOptimizer:
         for loop_idx in range(max_feedback_loops):
             qubo = self.build_qubo(mu=mu)
             
-            sampleset = sampler.sample_qubo(
-                qubo, 
-                num_reads=SQA_PARAMS["num_reads"], 
-                num_sweeps=SQA_PARAMS["num_sweeps"],
-                beta_range=SQA_PARAMS["beta_range"]
-            )
+            # OpenJij SQASampler uses beta (inverse temperature) and trotter slices.
+            # We map parameters safely from your classical config so nothing errors out.
+            sampling_kwargs = {
+                "num_reads": SQA_PARAMS.get("num_reads", 10),
+                "num_sweeps": SQA_PARAMS.get("num_sweeps", 1000)
+            }
+            
+            # Set the number of Trotter slices (defaulting to 16 if not specified in config)
+            sampling_kwargs["trotter"] = SQA_PARAMS.get("trotter", 16)
+            
+            if "beta" in SQA_PARAMS:
+                sampling_kwargs["beta"] = SQA_PARAMS["beta"]
+            elif "beta_range" in SQA_PARAMS and isinstance(SQA_PARAMS["beta_range"], (list, tuple)):
+                # Map the final inverse target temperature from your schedule
+                sampling_kwargs["beta"] = SQA_PARAMS["beta_range"][1]
+
+            # Executes true simulated quantum annealing via OpenJij C++ backend
+            sampleset = sampler.sample_qubo(qubo, **sampling_kwargs)
             
             current_loop_violation = 0.0
             found_structural_path = False
             
+            # OpenJij objects support the standardized dimod record iteration format
             for datum in sampleset.data(['sample']):
                 sample = datum.sample
                 
@@ -147,12 +161,10 @@ class SQAOptimizer:
                     
                     # Determine Feasibility
                     if self.capacity is None or clean_res <= self.capacity:
-                        # Track the lowest cost feasible path found so far
                         if clean_cost < best_feasible_cost:
                             best_feasible_cost = clean_cost
                             best_feasible_path = node_path
                     else:
-                        # Track the structural path with the lowest resource violation
                         if not found_structural_path:
                             found_structural_path = True
                             current_loop_violation = clean_res - self.capacity
@@ -170,14 +182,11 @@ class SQAOptimizer:
                 else:
                     mu += 2.5
 
-        # --- FINAL CONTROL FLOW EVALUATION ---
-        # 1. If we found a valid, feasible path at any point, return it as optimal
+        # --- CONTROL FLOW RETURN EVALUATION ---
         if best_feasible_path:
             return best_feasible_cost, best_feasible_path, True
             
-        # 2. If feasibility is 0 but we managed to find an infeasible structural path, return it as fallback
         if last_valid_path:
             return last_valid_cost, last_valid_path, False
             
-        # 3. Absolute worst case: no structural paths were found at all
         return float('inf'), [], False

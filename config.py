@@ -5,7 +5,7 @@ from pathlib import Path
 GRAPH_SIZES = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200]
 GRAPH_SIZES_NON_DAG = [5, 10, 20, 30, 40, 50]
 NUM_RUNS_DAG = 100
-NUM_RUNS_NON_DAG = 50
+NUM_RUNS_NON_DAG = 100
 PLOT_SOLUTIONS = False
 TIME_LIMIT_SEC = 500  # 5 minutes
 MASTER_SEED = 42
@@ -39,9 +39,15 @@ PSO_PARAMS = {
 }
 
 SQA_PARAMS = {
-    "num_reads": 100,
-    "num_sweeps": 1000,
-    "beta_range": (0.1, 10.0),
-    "flow_penalty": 150.0,
-    "cap_penalty": 50.0
+    "num_reads": 30,      # Keep this low during feedback loops (e.g., 5 to 10)
+    "num_sweeps": 400,    # CRITICAL: Drop this down! 
+    "trotter": 4,         # CRITICAL: Reduce the quantum slice dimension
 }
+
+# SQA_PARAMS = {
+#     "num_reads": 100,
+#     "num_sweeps": 1000,
+#     "beta_range": (0.1, 10.0),
+#     "flow_penalty": 150.0,
+#     "cap_penalty": 50.0
+# }
