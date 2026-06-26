@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 # --- Global Experiment Settings ---
-GRAPH_SIZES = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140]
+GRAPH_SIZES = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200]
 GRAPH_SIZES_NON_DAG = [5, 10, 20, 30, 40, 50]
 NUM_RUNS_DAG = 100
 NUM_RUNS_NON_DAG = 50
